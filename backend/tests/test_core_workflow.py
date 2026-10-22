@@ -57,12 +57,12 @@ def unique_email(prefix: str):
 
 def test_registration_and_login():
     email = unique_email("requester")
-    response = register_user(email, "secret123", "requester")
+    response = register_user(email, "SafePassword123", "requester")
     assert response.status_code == 201, response.text
 
     login_response = client.post(
         "/api/auth/login",
-        json={"email": email, "password": "secret123"},
+        json={"email": email, "password": "SafePassword123"},
     )
     assert login_response.status_code == 200, login_response.text
     assert "access_token" in login_response.json()
@@ -70,8 +70,8 @@ def test_registration_and_login():
 
 def test_requester_can_create_and_view_request():
     email = unique_email("requester2")
-    register_user(email, "secret123", "requester")
-    token = login(email, "secret123")
+    register_user(email, "SafePassword123", "requester")
+    token = login(email, "SafePassword123")
 
     response = client.post(
         "/api/requests",
@@ -84,7 +84,7 @@ def test_requester_can_create_and_view_request():
             "city": "Bengaluru",
             "latitude": 12.9716,
             "longitude": 77.5946,
-            "required_at": "2026-09-25T12:00:00",
+            "required_at": "2027-09-25T12:00:00",
             "urgency": "Emergency",
             "contact_name": "Request Contact",
             "contact_phone": "9900000000",
@@ -107,13 +107,13 @@ def test_coordinator_can_verify_request_and_match_donors():
     donor_email = "donor1@example.com"
     coordinator_email = "coordinator@example.com"
 
-    register_user(requester_email, "secret123", "requester")
-    register_user(donor_email, "secret123", "donor")
-    register_user(coordinator_email, "secret123", "coordinator")
+    register_user(requester_email, "SafePassword123", "requester")
+    register_user(donor_email, "SafePassword123", "donor")
+    register_user(coordinator_email, "SafePassword123", "coordinator")
 
-    requester_token = login(requester_email, "secret123")
-    donor_token = login(donor_email, "secret123")
-    coordinator_token = login(coordinator_email, "secret123")
+    requester_token = login(requester_email, "SafePassword123")
+    donor_token = login(donor_email, "SafePassword123")
+    coordinator_token = login(coordinator_email, "SafePassword123")
 
     request_response = client.post(
         "/api/requests",
@@ -126,7 +126,7 @@ def test_coordinator_can_verify_request_and_match_donors():
             "city": "Bengaluru",
             "latitude": 12.9716,
             "longitude": 77.5946,
-            "required_at": "2026-09-26T12:00:00",
+            "required_at": "2027-09-26T12:00:00",
             "urgency": "Emergency",
             "contact_name": "Request Contact",
             "contact_phone": "9900000001",
@@ -168,13 +168,13 @@ def test_donor_can_accept_and_decline_request():
     donor_email = "donor2@example.com"
     coordinator_email = "coordinator2@example.com"
 
-    register_user(requester_email, "secret123", "requester")
-    register_user(donor_email, "secret123", "donor")
-    register_user(coordinator_email, "secret123", "coordinator")
+    register_user(requester_email, "SafePassword123", "requester")
+    register_user(donor_email, "SafePassword123", "donor")
+    register_user(coordinator_email, "SafePassword123", "coordinator")
 
-    requester_token = login(requester_email, "secret123")
-    donor_token = login(donor_email, "secret123")
-    coordinator_token = login(coordinator_email, "secret123")
+    requester_token = login(requester_email, "SafePassword123")
+    donor_token = login(donor_email, "SafePassword123")
+    coordinator_token = login(coordinator_email, "SafePassword123")
 
     request_response = client.post(
         "/api/requests",
@@ -187,7 +187,7 @@ def test_donor_can_accept_and_decline_request():
             "city": "Hyderabad",
             "latitude": 17.4065,
             "longitude": 78.4772,
-            "required_at": "2026-09-27T12:00:00",
+            "required_at": "2027-09-27T12:00:00",
             "urgency": "Urgent",
             "contact_name": "Request Contact",
             "contact_phone": "9900000002",

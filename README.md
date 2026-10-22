@@ -62,8 +62,11 @@ cd backend
 ```bash
 cd frontend
 npm install
-npm run dev -- --host 0.0.0.0 --port 5173
+npm run dev
 ```
+
+The frontend development server binds to localhost by default. To expose it to
+other devices on a trusted LAN, explicitly run `npm run dev:lan`.
 
 ## Database and Migrations
 

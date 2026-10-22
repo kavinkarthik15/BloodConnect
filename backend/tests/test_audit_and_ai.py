@@ -23,7 +23,7 @@ def make_user(email: str, role: str):
         full_name=f"{role.title()} User",
         email=email,
         phone="9876543210",
-        password_hash=get_password_hash("secret123"),
+        password_hash=get_password_hash("SafePassword123"),
         role=role,
     )
     db.add(user)
@@ -34,7 +34,7 @@ def make_user(email: str, role: str):
 
 
 def login(email: str):
-    response = client.post("/api/auth/login", json={"email": email, "password": "secret123"})
+    response = client.post("/api/auth/login", json={"email": email, "password": "SafePassword123"})
     assert response.status_code == 200, response.text
     return response.json()["access_token"]
 
@@ -64,7 +64,7 @@ def test_coordinator_action_creates_audit_entry():
             "city": "Bengaluru",
             "latitude": 12.9716,
             "longitude": 77.5946,
-            "required_at": "2026-09-30T12:00:00",
+            "required_at": "2027-09-30T12:00:00",
             "urgency": "Urgent",
             "contact_name": "Audit Contact",
             "contact_phone": "9999999999",

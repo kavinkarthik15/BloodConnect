@@ -22,6 +22,8 @@ def _safe_match_payload(match: DonorMatch, request: BloodRequest, response: Dono
         "request_code": request.request_code,
         "blood_group_required": request.blood_group,
         "units_required": request.units_required,
+        "units_confirmed": request.units_confirmed,
+        "legacy_fulfillment_unverified": request.legacy_fulfillment_unverified,
         "hospital_name": request.hospital_name,
         "city": request.city,
         "urgency": request.urgency,
@@ -29,6 +31,7 @@ def _safe_match_payload(match: DonorMatch, request: BloodRequest, response: Dono
         "request_latitude": request.latitude,
         "request_longitude": request.longitude,
         "request_status": request.status,
+        "escalation_status": request.escalation_status,
         "distance_km": match.distance_km,
         "match_score": match.match_score,
         "donor_response_status": response.response if response else "pending",
@@ -124,6 +127,9 @@ def _response_payloads(db: Session, donor_id: int, responses: list[DonorResponse
             "response": response.response,
             "response_timestamp": response.responded_at,
             "request_status": request.status,
+            "units_required": request.units_required,
+            "units_confirmed": request.units_confirmed,
+            "escalation_status": request.escalation_status,
         })
     return result
 

@@ -42,6 +42,8 @@ class BloodRequestResponse(BaseModel):
     patient_reference: str
     blood_group: str
     units_required: int
+    units_confirmed: int = 0
+    legacy_fulfillment_unverified: bool = False
     hospital_name: str
     hospital_address: str
     city: str
@@ -53,6 +55,7 @@ class BloodRequestResponse(BaseModel):
     contact_phone: str
     notes: str | None = None
     status: str
+    escalation_status: str = "normal"
     verified_by: int | None = None
     verified_at: datetime | None = None
     fulfilled_at: datetime | None = None

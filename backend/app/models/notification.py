@@ -12,5 +12,6 @@ class Notification(Base):
     title = Column(String, nullable=False)
     message = Column(Text, nullable=False)
     related_entity_id = Column(Integer, nullable=True)
+    dedupe_key = Column(String, nullable=True, unique=True, index=True)
     is_read = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

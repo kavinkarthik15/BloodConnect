@@ -18,18 +18,14 @@ def record_audit(
     safe_metadata = dict(metadata or {})
     safe_metadata = {key: value for key, value in safe_metadata.items() if value is not None}
 
-    try:
-        audit = AuditLog(
-            actor_user_id=actor_user_id,
-            action=action,
-            entity_type=entity_type,
-            entity_id=str(entity_id) if entity_id is not None else None,
-            metadata_json=json.dumps(safe_metadata, default=str),
-            ip_address=ip_address,
-        )
-        db.add(audit)
-        db.flush()
-        return audit
-    except Exception:
-        db.rollback()
-        return None
+    audit = AuditLog(
+        actor_user_id=actor_user_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=str(entity_id) if entity_id is not None else None,
+        metadata_json=json.dumps(safe_metadata, default=str),
+        ip_address=ip_address,
+    )
+    db.add(audit)
+    db.flush()
+    return audit

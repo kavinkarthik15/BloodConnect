@@ -49,7 +49,7 @@ class AIService:
             requests = db.query(BloodRequest).filter(BloodRequest.requester_id == user.id).all()
             return {
                 "role": "requester",
-                "active_requests": sum(item.status not in {"fulfilled", "cancelled"} for item in requests),
+                "active_requests": sum(item.status in {"submitted", "verified", "coordinating", "partially_fulfilled"} for item in requests),
                 "latest_request_status": requests[0].status if requests else "none",
                 "published_campaigns": db.query(Campaign).filter(Campaign.status == "published").count(),
             }

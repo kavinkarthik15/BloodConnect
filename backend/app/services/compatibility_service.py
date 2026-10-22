@@ -13,7 +13,7 @@ COMPATIBILITY_RULES = {
 
 
 def is_potentially_compatible(donor_group: str, required_group: str) -> bool:
-    return required_group in COMPATIBILITY_RULES.get(donor_group, []) or donor_group == required_group
+    return donor_group in COMPATIBILITY_RULES.get(required_group, [])
 
 
 def get_compatibility_type(donor_group: str, required_group: str) -> str:

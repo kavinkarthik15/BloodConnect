@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import CoordinationMap from './components/maps/CoordinationMap';
+import { resolveAsyncState } from './asyncState.mjs';
 
 type Role = 'requester' | 'donor' | 'coordinator' | 'volunteer';
 type PublicRole = 'requester' | 'donor';
@@ -42,9 +43,10 @@ type RequestItem = {
   hospital_name?: string;
   hospital_address?: string;
   units_required?: number;
+  units_confirmed?: number;
+  legacy_fulfillment_unverified?: boolean;
+  escalation_status?: string;
   required_at?: string;
-  request_latitude?: number | null;
-  request_longitude?: number | null;
   contact_name?: string;
   contact_phone?: string;
   notes?: string;
@@ -60,10 +62,14 @@ type DonorMatchItem = {
   city: string;
   urgency: string;
   required_at?: string;
+  request_latitude?: number | null;
+  request_longitude?: number | null;
   request_status: string;
   distance_km?: number | null;
   match_score?: number;
-  donor_response_status: 'pending' | 'accepted' | 'declined';
+  donor_response_status: 'pending' | 'accepted' | 'declined' | 'withdrawn';
+  units_confirmed: number;
+  escalation_status: string;
   response_timestamp?: string | null;
 };
 
@@ -74,7 +80,10 @@ type DonorHistoryItem = {
   hospital_name: string;
   city: string;
   urgency: string;
-  response: 'accepted' | 'declined';
+  units_required?: number;
+  units_confirmed?: number;
+  escalation_status?: string;
+  response: 'accepted' | 'declined' | 'withdrawn';
   response_timestamp?: string;
   request_status: string;
 };
@@ -84,8 +93,10 @@ type MatchSummary = {
   pending_responses: number;
   accepted_count: number;
   declined_count: number;
+  withdrawn_count?: number;
   matches: Array<{
     match_id: number;
+    donor_id: number;
     donor_name: string;
     blood_group: string;
     city?: string;
@@ -93,6 +104,8 @@ type MatchSummary = {
     distance_km?: number | null;
     match_score?: number;
     response_status: string;
+    donation_confirmed: boolean;
+    units_confirmed: number;
   }>;
 };
 
@@ -138,12 +151,14 @@ type VolunteerAssignment = {
   patient_reference?: string;
   blood_group?: string;
   units_required?: number;
+  units_confirmed?: number;
   hospital_name?: string;
   hospital_address?: string;
   city?: string;
   required_at?: string;
   urgency?: string;
   request_status?: string;
+  escalation_status?: string;
   volunteer_id: number;
   volunteer_name?: string;
   status: 'assigned' | 'accepted' | 'in_progress' | 'completed' | 'cancelled';
@@ -186,8 +201,22 @@ type NotificationItem = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const COOKIE_AUTH_ENABLED = import.meta.env.VITE_COOKIE_AUTH_ENABLED === 'true';
 const TOKEN_KEY = 'nss-bloodconnect-token';
 const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+let csrfToken: string | null = null;
+
+async function fetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const method = (init.method || 'GET').toUpperCase();
+  if (COOKIE_AUTH_ENABLED) {
+    headers.delete('Authorization');
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && csrfToken) {
+      headers.set('X-CSRF-Token', csrfToken);
+    }
+  }
+  return globalThis.fetch(input, { ...init, headers, credentials: 'include' });
+}
 
 const roleDashboardPath: Record<Role, string> = {
   requester: '/dashboard/requester',
@@ -243,9 +272,13 @@ function getStoredToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
 
-async function fetchProfile(token: string): Promise<AppUser> {
+async function fetchProfile(token?: string): Promise<AppUser> {
+  const headers = new Headers();
+  if (!COOKIE_AUTH_ENABLED && token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
   const response = await fetch(`${API_BASE}/api/auth/me`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers,
   });
   if (!response.ok) {
     throw new Error('Unable to load account');
@@ -270,20 +303,30 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setAuthUser(null);
-      setAuthLoading(false);
-      return;
-    }
-
-    fetchProfile(token)
-      .then((user) => setAuthUser(user))
-      .catch(() => {
+    const restoreSession = async () => {
+      try {
+        if (COOKIE_AUTH_ENABLED) {
+          const csrfResponse = await fetch(`${API_BASE}/api/auth/csrf`);
+          if (csrfResponse.ok) {
+            csrfToken = (await csrfResponse.json()).csrf_token;
+          }
+          setAuthUser(await fetchProfile());
+          return;
+        }
+        const token = getStoredToken();
+        if (!token) {
+          setAuthUser(null);
+          return;
+        }
+        setAuthUser(await fetchProfile(token));
+      } catch {
         localStorage.removeItem(TOKEN_KEY);
         setAuthUser(null);
-      })
-      .finally(() => setAuthLoading(false));
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+    void restoreSession();
   }, []);
 
   useEffect(() => {
@@ -316,8 +359,23 @@ function App() {
     }
   }, [authLoading, authUser, route]);
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      const headers = new Headers();
+      if (!COOKIE_AUTH_ENABLED) {
+        const token = getStoredToken();
+        if (token) headers.set('Authorization', `Bearer ${token}`);
+      }
+      const response = await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', headers });
+      if (!response.ok) {
+        throw new Error('Sign out could not be confirmed.');
+      }
+    } catch {
+      window.alert('Unable to confirm sign out. Please try again.');
+      return;
+    }
     localStorage.removeItem(TOKEN_KEY);
+    csrfToken = null;
     setAuthUser(null);
     navigateTo('/');
   };
@@ -330,6 +388,8 @@ function App() {
     if (route === '/') return <LandingPage />;
     if (route === '/login') return authUser ? <DashboardRenderer user={authUser} onLogout={logout} /> : <LoginPage onLoginComplete={(user) => setAuthUser(user)} />;
     if (route === '/register') return authUser ? <DashboardRenderer user={authUser} onLogout={logout} /> : <RegisterPage />;
+    if (route === '/forgot-password') return <ForgotPasswordPage />;
+    if (route === '/reset-password') return <ResetPasswordPage />;
     if (route === '/about') return <AboutPage />;
     if (route === '/awareness') return <AwarenessPage />;
     if (route === '/campaigns') return <PublicCampaignsPage />;
@@ -397,6 +457,7 @@ function App() {
       }
       if (route === '/coordinator/analytics') return <CoordinatorAnalyticsPage user={authUser} />;
       if (route === '/coordinator/reports') return <CoordinatorReportsPage user={authUser} />;
+      if (route === '/coordinator/audit') return <CoordinatorAuditPage user={authUser} />;
     }
 
     if (route.startsWith('/dashboard')) {
@@ -415,45 +476,83 @@ function LandingPage() {
     <PageShell>
       <header className="topbar public-topbar">
         <div className="brand-block">
-          <span className="brand-mark">NSS</span>
+          <span className="brand-mark" aria-hidden="true">NSS</span>
           <div>
             <p className="eyebrow">Blood donation coordination</p>
             <h1>NSS BloodConnect</h1>
           </div>
         </div>
 
-        <nav className="public-actions">
+        <nav className="public-actions" aria-label="Public navigation">
+          <a className="text-nav-link" href="#how-it-works">How it works</a>
+          <a className="text-nav-link" href="#roles">Roles</a>
+          <a className="text-nav-link" href="#safety">Safety</a>
           <button className="secondary-button" onClick={() => navigateTo('/login')}>Sign In</button>
         </nav>
       </header>
 
       <main className="hero-layout">
         <section className="hero-copy">
-          <p className="eyebrow accent">Connecting Donors. Saving Lives. Empowering NSS.</p>
-          <h2>A blood donation coordination platform connecting people who need blood with potentially compatible available donors through NSS volunteers and coordinators.</h2>
+          <p className="eyebrow accent">A clearer path from request to coordination</p>
+          <h2>When blood is needed, help people coordinate the next step.</h2>
+          <p className="hero-description">NSS BloodConnect brings requesters, potential donors, volunteers, and coordinators into one accountable workflow. Every donor response is an opportunity to coordinate—not a promise of availability or clinical compatibility.</p>
           <div className="cta-row">
             <button className="primary-button" onClick={() => navigateTo('/register?role=requester')}>Request Blood</button>
             <button className="secondary-button" onClick={() => navigateTo('/register?role=donor')}>Become a Donor</button>
           </div>
+          <p className="hero-assurance"><span className="assurance-mark" aria-hidden="true">i</span> Donor eligibility and blood compatibility must be confirmed by qualified healthcare professionals or an authorized blood bank.</p>
         </section>
 
-        <aside className="hero-card">
-          <h3>How it works</h3>
-          <ol>
-            <li>Request Blood</li>
-            <li>Find Potential Donors</li>
-            <li>Notify Donors</li>
-            <li>Donor Responds</li>
-            <li>NSS Coordinator Verifies</li>
-            <li>Track Impact</li>
+        <aside className="hero-card" id="how-it-works">
+          <p className="eyebrow">A coordinated process</p>
+          <h3>What happens next</h3>
+          <ol className="process-list">
+            <li><span>01</span><div><strong>Submit a request</strong><small>Share the request and timing details.</small></div></li>
+            <li><span>02</span><div><strong>Coordinator reviews</strong><small>Authorized coordinators review requests.</small></div></li>
+            <li><span>03</span><div><strong>Potential donors respond</strong><small>Responses are offers to coordinate.</small></div></li>
+            <li><span>04</span><div><strong>Track confirmed outcomes</strong><small>Donation outcomes are recorded separately.</small></div></li>
           </ol>
         </aside>
       </main>
 
-      <section className="info-card">
-          <h3>About NSS BloodConnect</h3>
-          <p>NSS BloodConnect helps communities coordinate urgent blood support with a clear, accountable process. It provides a structured way for requesters to seek help, donors to indicate availability, and NSS teams to verify and coordinate response efforts while keeping medical decisions with qualified healthcare professionals.</p>
+      <section className="public-section" id="roles" aria-labelledby="roles-heading">
+        <div className="section-heading">
+          <p className="eyebrow">Working together</p>
+          <h2 id="roles-heading">A shared process, with clear roles</h2>
+          <p>Each person has a focused role in moving a request through coordination safely and transparently.</p>
+        </div>
+        <div className="role-grid">
+          <article className="role-card"><span className="role-index">01</span><h3>Requesters</h3><p>Submit a request and follow its progress, including requested and confirmed units.</p></article>
+          <article className="role-card"><span className="role-index">02</span><h3>Donors</h3><p>Manage availability and respond to matched opportunities when able.</p></article>
+          <article className="role-card"><span className="role-index">03</span><h3>Volunteers</h3><p>Support coordination for requests assigned by an authorized coordinator.</p></article>
+          <article className="role-card"><span className="role-index">04</span><h3>Coordinators</h3><p>Review requests, coordinate responses, and record verified outcomes.</p></article>
+        </div>
       </section>
+
+      <section className="public-section public-section-soft" id="safety" aria-labelledby="safety-heading">
+        <div className="awareness-panel">
+          <div>
+            <p className="eyebrow">Awareness and safety</p>
+            <h2 id="safety-heading">Coordination supports care. It does not replace it.</h2>
+            <p>BloodConnect does not determine donor eligibility, clinical compatibility, or whether a transfusion should occur. Please contact qualified healthcare professionals or an authorized blood bank for medical advice and urgent care.</p>
+          </div>
+          <aside className="guidance-card">
+            <h3>Need emergency medical help?</h3>
+            <p>Contact local emergency services and the treating hospital or authorized blood bank directly. This platform cannot guarantee donor availability or response times.</p>
+          </aside>
+        </div>
+      </section>
+
+      <section className="public-section trust-section" aria-label="Privacy and trust">
+        <div><p className="eyebrow">Privacy by design</p><h2>Personal information belongs in the right hands.</h2></div>
+        <p>Access is role-scoped. Donor location details are used for coordination only where permitted, and request responses do not confirm a donation. Share only information needed for coordination.</p>
+      </section>
+
+      <footer className="public-footer">
+        <div className="brand-block"><span className="brand-mark small" aria-hidden="true">NSS</span><div><strong>NSS BloodConnect</strong><small>Community blood donation coordination</small></div></div>
+        <nav aria-label="Footer navigation"><a className="text-nav-link" href="#roles">Roles</a><a className="text-nav-link" href="#safety">Safety</a><button className="text-nav-button" onClick={() => navigateTo('/login')}>Sign in</button></nav>
+        <p>For urgent medical needs, contact local emergency services or an authorized healthcare provider.</p>
+      </footer>
     </PageShell>
   );
 }
@@ -481,8 +580,11 @@ function LoginPage({ onLoginComplete }: { onLoginComplete: (user: AppUser) => vo
         throw new Error(data.detail || 'Login failed');
       }
 
-      localStorage.setItem(TOKEN_KEY, data.access_token);
-      const user = await fetchProfile(data.access_token);
+      csrfToken = data.csrf_token || null;
+      if (!COOKIE_AUTH_ENABLED) {
+        localStorage.setItem(TOKEN_KEY, data.access_token);
+      }
+      const user = await fetchProfile(COOKIE_AUTH_ENABLED ? undefined : data.access_token);
       onLoginComplete(user);
       navigateTo(roleDashboardPath[user.role]);
     } catch (err) {
@@ -520,6 +622,120 @@ function LoginPage({ onLoginComplete }: { onLoginComplete: (user: AppUser) => vo
 
           <p className="auth-footnote">
             Need an account? <button className="link-button" onClick={() => navigateTo('/register')}>Create one</button>
+          </p>
+          <p className="auth-footnote">
+            Forgot your password? <button className="link-button" onClick={() => navigateTo('/forgot-password')}>Reset it</button>
+          </p>
+        </section>
+      </div>
+    </PageShell>
+  );
+}
+
+function ForgotPasswordPage() {
+  const [email, setEmail] = useState('');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setMessage('');
+    setError('');
+    setIsSubmitting(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Unable to request a password reset.');
+      setMessage(data.message);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to request a password reset.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <PageShell>
+      <div className="auth-shell">
+        <section className="auth-card">
+          <h2>Reset your password</h2>
+          <form onSubmit={handleSubmit} className="form-stack">
+            <label className="field">
+              <span>Email</span>
+              <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+            </label>
+            {error ? <div className="error-box">{error}</div> : null}
+            {message ? <div className="success-box">{message}</div> : null}
+            <button type="submit" className="primary-button" disabled={isSubmitting}>
+              {isSubmitting ? 'Sending...' : 'Send reset instructions'}
+            </button>
+          </form>
+          <p className="auth-footnote">
+            <button className="link-button" onClick={() => navigateTo('/login')}>Return to sign in</button>
+          </p>
+        </section>
+      </div>
+    </PageShell>
+  );
+}
+
+function ResetPasswordPage() {
+  const [password, setPassword] = useState('');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [token] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('token') || '');
+
+  useEffect(() => {
+    if (window.location.hash) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setMessage('');
+    setError('');
+    setIsSubmitting(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, new_password: password }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Unable to reset your password.');
+      setMessage(data.message);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to reset your password.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <PageShell>
+      <div className="auth-shell">
+        <section className="auth-card">
+          <h2>Choose a new password</h2>
+          <form onSubmit={handleSubmit} className="form-stack">
+            <label className="field">
+              <span>New password</span>
+              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={12} maxLength={72} />
+            </label>
+            {error ? <div className="error-box">{error}</div> : null}
+            {message ? <div className="success-box">{message}</div> : null}
+            <button type="submit" className="primary-button" disabled={isSubmitting || !token}>
+              {isSubmitting ? 'Saving...' : 'Update password'}
+            </button>
+          </form>
+          <p className="auth-footnote">
+            <button className="link-button" onClick={() => navigateTo('/login')}>Return to sign in</button>
           </p>
         </section>
       </div>
@@ -601,7 +817,7 @@ function RegisterPage() {
 
             <label className="field">
               <span>Password</span>
-              <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={6} />
+              <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={12} maxLength={72} />
             </label>
 
             <label className="field">
@@ -673,9 +889,9 @@ function DashboardLayout({ user, onLogout, title, children }: { user: AppUser; o
           </div>
         </div>
 
-        <nav className="sidebar-nav">
+        <nav className="sidebar-nav" aria-label="Dashboard navigation">
           {navItems.map((item) => (
-              <button key={item.path} className={window.location.pathname === item.path ? 'nav-link active' : 'nav-link'} onClick={() => navigateTo(item.path)}>
+              <button key={item.path} className={window.location.pathname === item.path ? 'nav-link active' : 'nav-link'} aria-current={window.location.pathname === item.path ? 'page' : undefined} onClick={() => navigateTo(item.path)}>
               {item.label === 'Notifications' && unreadCount > 0 ? `${item.label} (${unreadCount})` : item.label}
             </button>
           ))}
@@ -701,6 +917,7 @@ function DashboardLayout({ user, onLogout, title, children }: { user: AppUser; o
 function RequesterDashboard({ user, onLogout }: { user: AppUser; onLogout: () => void }) {
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     const token = getStoredToken();
@@ -714,11 +931,14 @@ function RequesterDashboard({ user, onLogout }: { user: AppUser; onLogout: () =>
         const data = await response.json();
         setRequests(Array.isArray(data) ? data : []);
       })
-      .catch(() => setRequests([]))
+      .catch(() => setError('Unable to load your requests. Please try again.'))
       .finally(() => setLoading(false));
   }, []);
 
-  const activeRequests = requests.filter((item) => !['fulfilled', 'cancelled'].includes(item.status || ''));
+  const activeRequests = requests.filter((item) => !['fulfilled', 'cancelled', 'expired'].includes(item.status || ''));
+  const outstandingUnits = requests
+    .filter((item) => !['fulfilled', 'cancelled', 'expired'].includes(item.status || ''))
+    .reduce((sum, item) => sum + Math.max(0, (item.units_required || 0) - (item.units_confirmed || 0)), 0);
 
   return (
     <DashboardLayout user={user} onLogout={onLogout} title="Requester Dashboard">
@@ -732,33 +952,36 @@ function RequesterDashboard({ user, onLogout }: { user: AppUser; onLogout: () =>
 
       <div className="stats-row">
         <StatusCard label="Active requests" value={String(activeRequests.length)} />
-        <StatusCard label="Recent requests" value={String(Math.min(requests.length, 5))} />
+        <StatusCard label="Confirmed units" value={String(requests.reduce((sum, item) => sum + (item.units_confirmed || 0), 0))} tone="success" />
+        <StatusCard label="Units outstanding" value={String(outstandingUnits)} />
       </div>
 
       <div className="content-grid two-col">
         <section className="panel-block">
           <h4>Recent requests</h4>
-          {loading ? <LoadingState message="Loading requests..." /> : requests.length === 0 ? <EmptyState message="No requests have been created yet." /> : (
+          <AsyncState loading={loading} error={error} hasData={requests.length > 0} loadingMessage="Loading requests..." emptyMessage="No requests have been created yet.">
             <ul className="list-stack">
               {requests.slice(0, 5).map((item) => (
                 <li key={item.id} className="list-item">
                   <div>
                     <strong>{item.patient_reference || 'Untitled request'}</strong>
-                    <small>{item.request_code || 'BCR'} • {item.blood_group || 'Blood group not set'}</small>
+                    <small>{item.request_code || 'BCR'} • {item.blood_group || 'Blood group not set'} • {item.units_confirmed || 0} of {item.units_required || 0} units confirmed</small>
+                    {item.legacy_fulfillment_unverified ? <small>Legacy fulfilled status; donation outcome is unverified.</small> : null}
                   </div>
-                  <span className="pill status-pill">{item.status || 'submitted'}</span>
+                  <span className={`pill status-pill ${item.escalation_status && item.escalation_status !== 'normal' ? 'urgent' : ''}`}>{item.status || 'submitted'}</span>
                 </li>
               ))}
             </ul>
-          )}
+          </AsyncState>
         </section>
 
         <section className="panel-block">
           <h4>Request status</h4>
           <div className="info-stack">
             <div className="info-row"><span>Submitted</span><strong>{requests.filter((item) => item.status === 'submitted').length}</strong></div>
-            <div className="info-row"><span>Verified</span><strong>{requests.filter((item) => item.status === 'verified').length}</strong></div>
+            <div className="info-row"><span>Partially fulfilled</span><strong>{requests.filter((item) => item.status === 'partially_fulfilled').length}</strong></div>
             <div className="info-row"><span>Fulfilled</span><strong>{requests.filter((item) => item.status === 'fulfilled').length}</strong></div>
+            <div className="info-row"><span>Cancelled / expired</span><strong>{requests.filter((item) => ['cancelled', 'expired'].includes(item.status || '')).length}</strong></div>
           </div>
         </section>
       </div>
@@ -769,6 +992,11 @@ function RequesterDashboard({ user, onLogout }: { user: AppUser; onLogout: () =>
 function DonorDashboard({ user, onLogout }: { user: AppUser; onLogout: () => void }) {
   const [profile, setProfile] = useState<DonorProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [profileError, setProfileError] = useState('');
+  const [matches, setMatches] = useState<DonorMatchItem[]>([]);
+  const [matchesLoading, setMatchesLoading] = useState(true);
+  const [matchesError, setMatchesError] = useState('');
+  const [availabilityError, setAvailabilityError] = useState('');
   const [pendingToggle, setPendingToggle] = useState(false);
 
   useEffect(() => {
@@ -787,14 +1015,31 @@ function DonorDashboard({ user, onLogout }: { user: AppUser; onLogout: () => voi
         const data = await response.json();
         setProfile(data);
       })
-      .catch(() => setProfile(null))
+      .catch(() => setProfileError('Unable to load donor profile. Please try again.'))
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    const token = getStoredToken();
+    if (!token) return;
+
+    fetch(`${API_BASE}/api/donors/me/matches`, {
+      headers: !COOKIE_AUTH_ENABLED && token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Could not load matching requests');
+        const data = await response.json();
+        setMatches(Array.isArray(data) ? data : []);
+      })
+      .catch(() => setMatchesError('Unable to load matching requests. Please try again.'))
+      .finally(() => setMatchesLoading(false));
   }, []);
 
   const toggleAvailability = async () => {
     if (!profile) return;
     const nextState = !profile.available;
     setPendingToggle(true);
+    setAvailabilityError('');
 
     try {
       const token = getStoredToken();
@@ -806,7 +1051,7 @@ function DonorDashboard({ user, onLogout }: { user: AppUser; onLogout: () => voi
       const data = await response.json();
       setProfile((current) => (current ? { ...current, available: Boolean(data.available) } : current));
     } catch {
-      setProfile((current) => (current ? { ...current, available: current.available } : current));
+      setAvailabilityError('Availability could not be updated. Please try again.');
     } finally {
       setPendingToggle(false);
     }
@@ -834,11 +1079,14 @@ function DonorDashboard({ user, onLogout }: { user: AppUser; onLogout: () => voi
       <div className="content-grid two-col">
         <section className="panel-block">
           <h4>Availability</h4>
-          {loading ? <LoadingState message="Loading donor profile..." /> : (
+          {loading ? <LoadingState message="Loading donor profile..." /> : profileError ? <div className="error-box" role="alert">{profileError}</div> : !profile ? (
+            <EmptyState message="Complete your donor profile to manage availability." />
+          ) : (
             <>
-              <button className={profile?.available ? 'toggle-button on' : 'toggle-button'} onClick={toggleAvailability} disabled={pendingToggle}>
+              <button className={profile.available ? 'toggle-button on' : 'toggle-button'} onClick={toggleAvailability} disabled={pendingToggle}>
                 {pendingToggle ? 'Updating...' : profile?.available ? 'AVAILABLE' : 'UNAVAILABLE'}
               </button>
+              {availabilityError ? <p className="error-box" role="alert">{availabilityError}</p> : null}
               <p className="muted-text">{availabilityMessage}</p>
             </>
           )}
@@ -858,14 +1106,30 @@ function DonorDashboard({ user, onLogout }: { user: AppUser; onLogout: () => voi
         </section>
       </div>
 
+      <div className="stats-row">
+        <StatusCard label="Matching opportunities" value={String(matches.length)} />
+        <StatusCard label="Awaiting your response" value={String(matches.filter((item) => item.donor_response_status === 'pending').length)} />
+        <StatusCard label="Accepted responses" value={String(matches.filter((item) => item.donor_response_status === 'accepted').length)} tone="success" />
+      </div>
+
       <div className="content-grid">
         <section className="panel-block">
-          <h4>Accepted requests</h4>
-          <EmptyState message="No accepted requests yet." />
-        </section>
-        <section className="panel-block">
-          <h4>Recent response history</h4>
-          <EmptyState message="Your recent responses will appear here." />
+          <h4>Matching opportunities</h4>
+          {matchesLoading ? <LoadingState message="Loading matching opportunities..." /> : matchesError ? <div className="error-box" role="alert">{matchesError}</div> : matches.length === 0 ? <EmptyState message="No matching requests are currently available. Your response history remains separate from confirmed donation outcomes." /> : (
+            <ul className="list-stack">
+              {matches.slice(0, 5).map((item) => (
+                <li key={item.match_id} className="list-item">
+                  <div>
+                    <strong>{item.request_code}</strong>
+                    <small>{item.hospital_name} • {item.city} • {item.urgency}</small>
+                    <small>{item.units_confirmed} of {item.units_required} units confirmed • {item.distance_km == null ? 'Distance unavailable' : `${item.distance_km} km`}</small>
+                  </div>
+                  <span className="pill status-pill">{item.donor_response_status}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="muted-text">Accepting is an offer to coordinate and does not confirm a donation.</p>
         </section>
       </div>
     </DashboardLayout>
@@ -875,6 +1139,7 @@ function DonorDashboard({ user, onLogout }: { user: AppUser; onLogout: () => voi
 function VolunteerDashboard({ user, onLogout }: { user: AppUser; onLogout: () => void }) {
   const [assignments, setAssignments] = useState<VolunteerAssignment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     const token = getStoredToken();
@@ -888,7 +1153,7 @@ function VolunteerDashboard({ user, onLogout }: { user: AppUser; onLogout: () =>
         const data = await response.json();
         setAssignments(Array.isArray(data) ? data : []);
       })
-      .catch(() => setAssignments([]))
+      .catch(() => setError('Unable to load assigned requests. Please try again.'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -903,13 +1168,14 @@ function VolunteerDashboard({ user, onLogout }: { user: AppUser; onLogout: () =>
       <div className="content-grid">
         <section className="panel-block">
           <h4>Assigned requests</h4>
-          {loading ? <LoadingState message="Loading assigned requests..." /> : assignments.length === 0 ? <EmptyState message="No assigned requests currently available." /> : (
+          {loading ? <LoadingState message="Loading assigned requests..." /> : error ? <div className="error-box" role="alert">{error}</div> : assignments.length === 0 ? <EmptyState message="No assigned requests currently available." /> : (
             <ul className="list-stack">
               {assignments.slice(0, 5).map((item) => (
                 <li key={item.id} className="list-item">
                   <div>
                     <strong>{item.request_code || 'Request'}</strong>
-                    <small>{item.hospital_name || 'Hospital not set'}</small>
+                    <small>{item.hospital_name || 'Hospital not set'} • {item.city || 'City not set'}</small>
+                    <small>{item.request_status || 'Request status unavailable'} • {item.units_confirmed || 0} of {item.units_required || 0} units confirmed</small>
                   </div>
                   <span className="pill status-pill">{item.status}</span>
                 </li>
@@ -930,6 +1196,7 @@ function VolunteerDashboard({ user, onLogout }: { user: AppUser; onLogout: () =>
 function CoordinatorDashboard({ user, onLogout }: { user: AppUser; onLogout: () => void }) {
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     const token = getStoredToken();
@@ -943,32 +1210,42 @@ function CoordinatorDashboard({ user, onLogout }: { user: AppUser; onLogout: () 
         const data = await response.json();
         setRequests(Array.isArray(data) ? data : []);
       })
-      .catch(() => setRequests([]))
+      .catch(() => setError('Unable to load requests. Please try again.'))
       .finally(() => setLoading(false));
   }, []);
 
   const pendingVerification = requests.filter((item) => item.status === 'submitted').length;
-  const activeRequests = requests.filter((item) => !['fulfilled', 'cancelled'].includes(item.status || '')).length;
+  const activeItems = requests.filter((item) => !['fulfilled', 'cancelled', 'expired'].includes(item.status || ''));
+  const activeRequests = activeItems.length;
+  const escalatedRequests = activeItems.filter((item) => item.escalation_status && item.escalation_status !== 'normal').length;
+  const priorityRequests = [...activeItems].sort((a, b) => {
+    const aPriority = (a.escalation_status && a.escalation_status !== 'normal' ? 2 : 0) + (['emergency', 'critical', 'urgent'].includes((a.urgency || '').toLowerCase()) ? 1 : 0);
+    const bPriority = (b.escalation_status && b.escalation_status !== 'normal' ? 2 : 0) + (['emergency', 'critical', 'urgent'].includes((b.urgency || '').toLowerCase()) ? 1 : 0);
+    return bPriority - aPriority;
+  });
 
   return (
     <DashboardLayout user={user} onLogout={onLogout} title="Coordinator Dashboard">
       <div className="stats-row">
         <StatusCard label="Pending verification" value={String(pendingVerification)} />
         <StatusCard label="Active requests" value={String(activeRequests)} />
+        <StatusCard label="Escalated requests" value={String(escalatedRequests)} />
       </div>
 
       <div className="content-grid two-col">
         <section className="panel-block">
-          <h4>Active requests</h4>
-          {loading ? <LoadingState message="Loading active requests..." /> : requests.length === 0 ? <EmptyState message="No active requests have been submitted yet." /> : (
+          <h4>Priority requests</h4>
+          {loading ? <LoadingState message="Loading requests..." /> : error ? <div className="error-box" role="alert">{error}</div> : priorityRequests.length === 0 ? <EmptyState message="No active requests are awaiting coordination." /> : (
             <ul className="list-stack">
-              {requests.slice(0, 5).map((item) => (
+              {priorityRequests.slice(0, 8).map((item) => (
                 <li key={item.id} className="list-item">
                   <div>
                     <strong>{item.patient_reference || 'Request'}</strong>
-                    <small>{item.city || 'City not set'}</small>
+                    <small>{item.request_code || 'BCR'} • {item.city || 'City not set'} • {item.urgency || 'Urgency not set'}</small>
+                    <small>{item.units_confirmed || 0} of {item.units_required || 0} units confirmed</small>
+                    {item.escalation_status && item.escalation_status !== 'normal' ? <small>Escalation: {item.escalation_status}</small> : null}
                   </div>
-                  <span className="pill status-pill">{item.status || 'submitted'}</span>
+                  <span className={`pill status-pill ${item.escalation_status && item.escalation_status !== 'normal' ? 'urgent' : ''}`}>{item.status || 'submitted'}</span>
                 </li>
               ))}
             </ul>
@@ -976,15 +1253,10 @@ function CoordinatorDashboard({ user, onLogout }: { user: AppUser; onLogout: () 
         </section>
 
         <section className="panel-block">
-          <h4>Available donors</h4>
-          <EmptyState message="Donor directory data is not available in this phase." />
-        </section>
-      </div>
-
-      <div className="content-grid">
-        <section className="panel-block">
-          <h4>Recent donor responses</h4>
-          <EmptyState message="Recent organizer responses will appear here as donor interactions are recorded." />
+          <h4>Coordinator actions</h4>
+          <p className="muted-text">Review new requests and use request details to coordinate donor responses and record authorized donation verification.</p>
+          <button className="secondary-button" onClick={() => navigateTo('/coordinator/requests')}>Open request queue</button>
+          <p className="muted-text">Donor directory and response summaries are not exposed in this dashboard view.</p>
         </section>
       </div>
     </DashboardLayout>
@@ -1232,7 +1504,7 @@ function RequestsListPage({ user }: { user: AppUser }) {
   const filtered = requests.filter((request) => {
     if (filter === 'all') return true;
     if (filter === 'pending') return request.status === 'submitted' || request.status === 'verified';
-    if (filter === 'active') return !['fulfilled', 'cancelled'].includes(request.status || '');
+    if (filter === 'active') return ['submitted', 'verified', 'coordinating', 'partially_fulfilled'].includes(request.status || '');
     if (filter === 'fulfilled') return request.status === 'fulfilled';
     if (filter === 'cancelled') return request.status === 'cancelled';
     return true;
@@ -1262,7 +1534,7 @@ function RequestsListPage({ user }: { user: AppUser }) {
                 </div>
                 <div className="request-meta">
                   <span>{request.blood_group}</span>
-                  <span>{request.units_required} units</span>
+                  <span>{request.units_confirmed || 0} / {request.units_required} units confirmed</span>
                   <span>{request.urgency}</span>
                 </div>
                 <div className="right-meta">
@@ -1301,7 +1573,7 @@ function RequestDetailPage({ user, requestId }: { user: AppUser; requestId: numb
       .finally(() => setLoading(false));
   }, [requestId]);
 
-  const stages = ['submitted', 'verified', 'donor_accepted', 'fulfilled'];
+  const stages = ['submitted', 'verified', 'coordinating', 'partially_fulfilled', 'fulfilled'];
   const currentStage = request?.status || 'submitted';
   const stageIndex = Math.max(0, stages.indexOf(currentStage));
 
@@ -1318,6 +1590,7 @@ function RequestDetailPage({ user, requestId }: { user: AppUser; requestId: numb
                   <div className="info-row"><span>Request code</span><strong>{request.request_code}</strong></div>
                   <div className="info-row"><span>Blood group</span><strong>{request.blood_group}</strong></div>
                   <div className="info-row"><span>Units required</span><strong>{request.units_required}</strong></div>
+                  <div className="info-row"><span>Units confirmed</span><strong>{request.units_confirmed || 0} of {request.units_required}</strong></div>
                   <div className="info-row"><span>Urgency</span><strong>{request.urgency}</strong></div>
                   <div className="info-row"><span>Hospital</span><strong>{request.hospital_name}</strong></div>
                   <div className="info-row"><span>Address</span><strong>{request.hospital_address}</strong></div>
@@ -1338,6 +1611,8 @@ function RequestDetailPage({ user, requestId }: { user: AppUser; requestId: numb
                 </div>
                 <div className="info-stack compact">
                   <div className="info-row"><span>Status</span><strong><StatusBadge text={request.status || 'submitted'} /></strong></div>
+                  {request.legacy_fulfillment_unverified ? <p className="muted-text">Legacy fulfilled status; no donation confirmation records are available.</p> : null}
+                  {request.escalation_status && request.escalation_status !== 'normal' ? <div className="info-row"><span>Escalation</span><strong><StatusBadge text={request.escalation_status} /></strong></div> : null}
                   <div className="info-row"><span>Notes</span><strong>{request.notes || 'No additional notes.'}</strong></div>
                 </div>
               </div>
@@ -1347,6 +1622,9 @@ function RequestDetailPage({ user, requestId }: { user: AppUser; requestId: numb
               <CoordinationMap request={requestMap.request} />
               <div className="map-aggregate"><span>Potential donors found: {requestMap.potential_donors}</span><span>Accepted donors: {requestMap.accepted_donors}</span></div>
             </section> : null}
+            {user.role === 'requester' && ['submitted', 'verified', 'coordinating', 'partially_fulfilled'].includes(request.status || '') && (request.units_confirmed || 0) === 0 ? (
+              <button className="secondary-button" onClick={() => void cancelRequesterRequest(request.id)}>Cancel Request</button>
+            ) : null}
           </>
         )}
       </div>
@@ -1442,12 +1720,15 @@ function DonorRequestDetailPage({ user, requestId }: { user: AppUser; requestId:
                 <div className="info-stack compact">
                   <div className="info-row"><span>Required blood group</span><strong>{request.blood_group_required}</strong></div>
                   <div className="info-row"><span>Units</span><strong>{request.units_required}</strong></div>
+                  <div className="info-row"><span>Units confirmed</span><strong>{request.units_confirmed} of {request.units_required}</strong></div>
                   <div className="info-row"><span>Hospital</span><strong>{request.hospital_name}</strong></div>
                   <div className="info-row"><span>City / area</span><strong>{request.city}</strong></div>
                   <div className="info-row"><span>Urgency</span><strong>{request.urgency}</strong></div>
                   <div className="info-row"><span>Required</span><strong>{request.required_at ? new Date(request.required_at).toLocaleString() : 'Not set'}</strong></div>
                   <div className="info-row"><span>Distance</span><strong>{request.distance_km == null ? 'Unavailable' : `${request.distance_km} km`}</strong></div>
                   <div className="info-row"><span>Request status</span><strong>{request.request_status}</strong></div>
+                  <div className="info-row"><span>Confirmed units</span><strong>{request.units_confirmed} of {request.units_required}</strong></div>
+                  {request.escalation_status !== 'normal' ? <div className="info-row"><span>Escalation</span><strong>{request.escalation_status}</strong></div> : null}
                 </div>
                 <CoordinationMap request={{ latitude: request.request_latitude, longitude: request.request_longitude, hospital_name: request.hospital_name, city: request.city }} />
               </div>
@@ -1458,7 +1739,7 @@ function DonorRequestDetailPage({ user, requestId }: { user: AppUser; requestId:
                   {request.donor_response_status === 'pending' ? <>
                     <button className="primary-button" onClick={() => respondToRequest(request.request_id, 'accepted')}>Accept Request</button>
                     <button className="secondary-button" onClick={() => respondToRequest(request.request_id, 'declined')}>Decline Request</button>
-                  </> : <StatusBadge text={request.donor_response_status} />}
+                  </> : <><StatusBadge text={request.donor_response_status} /><p>An accepted response is an offer to coordinate, not confirmation of a donation.</p>{request.donor_response_status === 'accepted' ? <button className="secondary-button" onClick={() => respondToRequest(request.request_id, 'withdrawn')}>Withdraw Response</button> : null}</>}
                 </div>
               </div>
             </div>
@@ -1490,7 +1771,7 @@ function DonorAcceptedPage({ user }: { user: AppUser }) {
           <div className="card-list">{items.map((item) => <div key={item.request_id} className="request-card">
             <div><strong>{item.request_code}</strong><small>{item.hospital_name}</small></div>
             <div className="request-meta"><span>{item.blood_group}</span><span>{item.city}</span><span>{item.urgency}</span></div>
-            <div className="right-meta"><StatusBadge text={item.request_status} /><small>{item.response_timestamp ? new Date(item.response_timestamp).toLocaleString() : 'Recently'}</small></div>
+            <div className="right-meta"><StatusBadge text={item.request_status} /><small>{item.units_confirmed || 0} / {item.units_required} units confirmed • {item.response_timestamp ? new Date(item.response_timestamp).toLocaleString() : 'Recently'}</small></div>
           </div>)}</div>
         )}
       </div>
@@ -1524,7 +1805,7 @@ function DonorHistoryPage({ user }: { user: AppUser }) {
           <div className="card-list">{filtered.map((item) => <div key={`${item.request_id}-${item.response}`} className="request-card">
             <div><strong>{item.request_code}</strong><small>{item.hospital_name}</small></div>
             <div className="request-meta"><span>{item.blood_group}</span><span>{item.city}</span></div>
-            <div className="right-meta"><StatusBadge text={item.response} /><small>{item.response_timestamp ? new Date(item.response_timestamp).toLocaleString() : 'Recently'} • {item.request_status}</small></div>
+            <div className="right-meta"><StatusBadge text={item.response} /><small>{item.units_confirmed || 0} / {item.units_required} units confirmed • {item.response_timestamp ? new Date(item.response_timestamp).toLocaleString() : 'Recently'} • {item.request_status}</small></div>
           </div>)}</div>
         )}
       </div>
@@ -1535,17 +1816,20 @@ function DonorHistoryPage({ user }: { user: AppUser }) {
 function VolunteerAssignedPage({ user }: { user: AppUser }) {
   const [assignments, setAssignments] = useState<VolunteerAssignment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   useEffect(() => {
     fetch(`${API_BASE}/api/volunteers/me/assignments`, { headers: { Authorization: `Bearer ${getStoredToken()}` } })
       .then(async (response) => { if (!response.ok) throw new Error('Unable to load assignments'); return response.json(); })
       .then((data) => setAssignments(Array.isArray(data) ? data : []))
-      .catch(() => setAssignments([]))
+      .catch(() => setError('Unable to load assigned requests. Please try again.'))
       .finally(() => setLoading(false));
   }, []);
   return (
     <DashboardLayout user={user} onLogout={() => navigateTo('/')} title="Assigned Requests">
       <div className="panel-block">
-        {loading ? <LoadingState message="Loading assignments..." /> : assignments.length === 0 ? <EmptyState message="No requests are currently assigned to you." /> : <div className="card-list">{assignments.map((assignment) => <button key={assignment.id} className="request-card" onClick={() => navigateTo(`/volunteer/requests/${assignment.request_id}`)}><div><strong>{assignment.request_code}</strong><small>{assignment.hospital_name} • {assignment.city}</small></div><StatusBadge text={assignment.status} /></button>)}</div>}
+        <AsyncState loading={loading} error={error} hasData={assignments.length > 0} loadingMessage="Loading assignments..." emptyMessage="No requests are currently assigned to you.">
+          <div className="card-list">{assignments.map((assignment) => <button key={assignment.id} className="request-card" onClick={() => navigateTo(`/volunteer/requests/${assignment.request_id}`)}><div><strong>{assignment.request_code}</strong><small>{assignment.hospital_name} • {assignment.city}</small></div><StatusBadge text={assignment.status} /></button>)}</div>
+        </AsyncState>
       </div>
     </DashboardLayout>
   );
@@ -1642,6 +1926,7 @@ function VolunteerRequestDetailPage({ user, requestId }: { user: AppUser; reques
               <div className="info-stack compact">
                 <div className="info-row"><span>Blood group</span><strong>{assignment.blood_group}</strong></div>
                 <div className="info-row"><span>Units</span><strong>{assignment.units_required}</strong></div>
+                <div className="info-row"><span>Units confirmed</span><strong>{assignment.units_confirmed || 0} / {assignment.units_required}</strong></div>
                 <div className="info-row"><span>Hospital</span><strong>{assignment.hospital_name}</strong></div>
                 <div className="info-row"><span>Address</span><strong>{assignment.hospital_address}</strong></div>
                 <div className="info-row"><span>City</span><strong>{assignment.city}</strong></div>
@@ -1665,19 +1950,21 @@ function VolunteerRequestDetailPage({ user, requestId }: { user: AppUser; reques
 function CoordinatorVerificationPage({ user }: { user: AppUser }) {
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const loadRequests = async () => {
     const token = getStoredToken();
     if (!token) return;
 
     setLoading(true);
+    setError('');
     try {
       const response = await fetch(`${API_BASE}/api/requests`, { headers: { Authorization: `Bearer ${token}` } });
       const data = await response.json();
       if (!response.ok) throw new Error('Unable to load verification queue');
       setRequests(Array.isArray(data) ? data.filter((item) => item.status === 'submitted') : []);
     } catch {
-      setRequests([]);
+      setError('Unable to load the verification queue. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -1698,7 +1985,7 @@ function CoordinatorVerificationPage({ user }: { user: AppUser }) {
   return (
     <DashboardLayout user={user} onLogout={() => navigateTo('/')} title="Pending Verification">
       <div className="panel-block">
-        {loading ? <LoadingState message="Loading verification queue..." /> : requests.length === 0 ? <EmptyState message="No submitted requests are awaiting verification." /> : (
+        <AsyncState loading={loading} error={error} hasData={requests.length > 0} loadingMessage="Loading verification queue..." emptyMessage="No submitted requests are awaiting verification.">
           <div className="card-list">
             {requests.map((request) => (
               <div key={request.id} className="request-card">
@@ -1708,7 +1995,7 @@ function CoordinatorVerificationPage({ user }: { user: AppUser }) {
               </div>
             ))}
           </div>
-        )}
+        </AsyncState>
       </div>
     </DashboardLayout>
   );
@@ -1761,6 +2048,8 @@ function CoordinatorRequestDetailPage({ user, requestId }: { user: AppUser; requ
   const [assignments, setAssignments] = useState<VolunteerAssignment[]>([]);
   const [volunteers, setVolunteers] = useState<ManagedVolunteer[]>([]);
   const [selectedVolunteer, setSelectedVolunteer] = useState('');
+  const [confirmationUnits, setConfirmationUnits] = useState('1');
+  const [confirmationSource, setConfirmationSource] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -1823,8 +2112,7 @@ function CoordinatorRequestDetailPage({ user, requestId }: { user: AppUser; requ
       const response = await fetch(`${API_BASE}/api/requests/${requestId}/match`, { method: 'POST', headers: { Authorization: `Bearer ${getStoredToken()}` } });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Unable to find donors');
-      if (!data.matched_count && (!request?.latitude || !request?.longitude)) throw new Error('Request location could not be resolved. Donor matching cannot be performed.');
-      setMessage(`${data.matched_count} potential donors found.`);
+      setMessage(data.matched_count ? `${data.matched_count} potential donors found.` : 'No potentially compatible donors were found using the available location information.');
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to find donors');
@@ -1860,6 +2148,44 @@ function CoordinatorRequestDetailPage({ user, requestId }: { user: AppUser; requ
     if (response.ok) await loadData();
   };
 
+  const confirmDonation = async (donorId: number) => {
+    const token = getStoredToken();
+    if (!token || !request) return;
+    setActionLoading(true);
+    setError('');
+    try {
+      const response = await fetch(`${API_BASE}/api/requests/${requestId}/donations/${donorId}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({
+          units_confirmed: Number(confirmationUnits),
+          verification_source: confirmationSource,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Unable to record donation confirmation');
+      setMessage('Donation outcome recorded. This does not assert transfusion.');
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to record donation confirmation');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const closeRequest = async () => {
+    const token = getStoredToken();
+    if (!token) return;
+    const response = await fetch(`${API_BASE}/api/requests/${requestId}/close`, { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.detail || 'Unable to close request');
+      return;
+    }
+    setMessage('Request closed.');
+    await loadData();
+  };
+
   return (
     <DashboardLayout user={user} onLogout={() => navigateTo('/')} title="Coordinator Request Details">
       <div className="panel-block">
@@ -1871,7 +2197,9 @@ function CoordinatorRequestDetailPage({ user, requestId }: { user: AppUser; requ
                 <div className="info-row"><span>Request code</span><strong>{request.request_code}</strong></div>
                 <div className="info-row"><span>Requester</span><strong>{request.contact_name || 'Requester not disclosed'}</strong></div>
                 <div className="info-row"><span>Blood group</span><strong>{request.blood_group}</strong></div>
-                <div className="info-row"><span>Units</span><strong>{request.units_required}</strong></div>
+                <div className="info-row"><span>Units required</span><strong>{request.units_required}</strong></div>
+                <div className="info-row"><span>Units confirmed</span><strong>{request.units_confirmed || 0} / {request.units_required}</strong></div>
+                <div className="info-row"><span>Escalation</span><strong>{request.escalation_status || 'normal'}</strong></div>
                 <div className="info-row"><span>Hospital</span><strong>{request.hospital_name}</strong></div>
                 <div className="info-row"><span>Location</span><strong>{request.city}</strong></div>
                 <div className="info-row"><span>Urgency</span><strong>{request.urgency}</strong></div>
@@ -1889,16 +2217,18 @@ function CoordinatorRequestDetailPage({ user, requestId }: { user: AppUser; requ
                 <div className="info-row"><span>Awaiting response</span><strong>{summary?.pending_responses ?? 0}</strong></div>
               </div>
               {summary?.matches.length ? <div className="card-list">{summary.matches.map((match) => <div key={match.match_id} className="list-item">
-                <div><strong>{match.donor_name}</strong><small>{match.blood_group} • {match.area || match.city || 'Location unavailable'}</small></div>
+                <div><strong>{match.donor_name}</strong><small>{match.blood_group} • {match.area || match.city || 'Location unavailable'} • {match.units_confirmed} confirmed unit(s)</small></div>
                 <span className="pill status-pill">{match.response_status} • {match.distance_km ?? 'N/A'} km</span>
+                {match.response_status === 'accepted' && !match.donation_confirmed && request.status !== 'fulfilled' ? <div className="inline-actions"><label>Confirmed units <input type="number" min="1" max={Math.max(0, (request.units_required ?? 0) - (request.units_confirmed || 0))} value={confirmationUnits} onChange={(event) => setConfirmationUnits(event.target.value)} /></label><label>Verification source <input value={confirmationSource} onChange={(event) => setConfirmationSource(event.target.value)} placeholder="Authorized blood bank or healthcare professional" required /></label><button className="secondary-button" onClick={() => void confirmDonation(match.donor_id)} disabled={actionLoading || !confirmationSource.trim()}>Record verified donation</button></div> : null}
               </div>)}</div> : <p className="muted-text">No potential donors have been matched.</p>}
               {coordinationMap ? <CoordinationMap request={coordinationMap.request} donors={coordinationMap.matched_donors} showDonors /> : null}
               <h4>Volunteer Coordination</h4>
-              {volunteers.length ? <div className="button-row"><select value={selectedVolunteer} onChange={(event) => setSelectedVolunteer(event.target.value)}><option value="">Select volunteer</option>{volunteers.filter((volunteer) => volunteer.active).map((volunteer) => <option key={volunteer.volunteer_id} value={volunteer.volunteer_id}>{volunteer.name}</option>)}</select><button className="secondary-button" onClick={() => void assignVolunteer()} disabled={!selectedVolunteer || actionLoading}>Assign Volunteer</button></div> : <p className="muted-text">No active volunteer accounts are available.</p>}
+              {volunteers.length ? <div className="button-row"><label htmlFor="coordinator-volunteer">Volunteer to assign</label><select id="coordinator-volunteer" value={selectedVolunteer} onChange={(event) => setSelectedVolunteer(event.target.value)}><option value="">Select volunteer</option>{volunteers.filter((volunteer) => volunteer.active).map((volunteer) => <option key={volunteer.volunteer_id} value={volunteer.volunteer_id}>{volunteer.name}</option>)}</select><button className="secondary-button" onClick={() => void assignVolunteer()} disabled={!selectedVolunteer || actionLoading}>Assign Volunteer</button></div> : <p className="muted-text">No active volunteer accounts are available.</p>}
               {assignments.length ? <div className="card-list">{assignments.map((assignment) => <div key={assignment.id} className="list-item"><div><strong>{assignment.volunteer_name}</strong><small>{assignment.status} • {assignment.notes || 'No coordinator notes'}</small></div>{!['completed', 'cancelled'].includes(assignment.status) ? <button className="secondary-button" onClick={() => void cancelAssignment(assignment.id)}>Cancel Assignment</button> : null}</div>)}</div> : <p className="muted-text">No volunteers assigned to this request.</p>}
               <div className="button-row">
                 {request.status === 'submitted' ? <button className="primary-button" onClick={() => void verifyRequest()} disabled={actionLoading}>{actionLoading ? 'Verifying...' : 'Verify'}</button> : null}
                 {request.status === 'verified' ? <button className="secondary-button" onClick={() => void findDonors()} disabled={actionLoading}>{actionLoading ? 'Finding...' : 'Find Potential Donors'}</button> : null}
+                {['submitted', 'verified', 'coordinating', 'partially_fulfilled'].includes(request.status || '') ? <button className="secondary-button" onClick={() => void closeRequest()} disabled={actionLoading}>Close Request</button> : null}
                 <button className="secondary-button" onClick={() => navigateTo(`/coordinator/requests`)}>Back to list</button>
               </div>
             </div>
@@ -2303,25 +2633,46 @@ function PublicHeader() {
   );
 }
 
-async function respondToRequest(requestId: number, response: 'accepted' | 'declined') {
+async function respondToRequest(requestId: number, response: 'accepted' | 'declined' | 'withdrawn') {
   const token = getStoredToken();
   if (!token) {
     navigateTo('/login');
     return;
   }
 
-  const endpoint = response === 'accepted' ? `${API_BASE}/api/requests/${requestId}/accept` : `${API_BASE}/api/requests/${requestId}/decline`;
+  const endpoint = response === 'withdrawn'
+    ? `${API_BASE}/api/requests/${requestId}/withdraw`
+    : response === 'accepted'
+      ? `${API_BASE}/api/requests/${requestId}/accept`
+      : `${API_BASE}/api/requests/${requestId}/decline`;
   const result = await fetch(endpoint, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!result.ok) {
-    alert(response === 'accepted' ? 'This request could not be accepted.' : 'This request could not be declined.');
+    alert(response === 'accepted' ? 'This request could not be accepted.' : response === 'withdrawn' ? 'This response could not be withdrawn.' : 'This request could not be declined.');
     return;
   }
 
   navigateTo(response === 'accepted' ? '/donor/accepted' : '/donor/history');
+}
+
+async function cancelRequesterRequest(requestId: number) {
+  const token = getStoredToken();
+  if (!token) {
+    navigateTo('/login');
+    return;
+  }
+  const result = await fetch(`${API_BASE}/api/requests/${requestId}/cancel`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token },
+  });
+  if (!result.ok) {
+    alert('This request could not be cancelled.');
+    return;
+  }
+  navigateTo('/requests');
 }
 
 function throwingError(data: any, fallback: string) {
@@ -2333,11 +2684,27 @@ function PageShell({ children }: { children: React.ReactNode }) {
 }
 
 function LoadingState({ message }: { message: string }) {
-  return <div className="empty-state">{message}</div>;
+  return <div className="empty-state" role="status" aria-live="polite">{message}</div>;
 }
 
 function EmptyState({ message }: { message: string }) {
-  return <div className="empty-state">{message}</div>;
+  return <div className="empty-state" role="status">{message}</div>;
+}
+
+function AsyncState({ loading, error, hasData, loadingMessage, emptyMessage, children }: {
+  loading: boolean;
+  error: string;
+  hasData: boolean;
+  loadingMessage: string;
+  emptyMessage: string;
+  children: React.ReactNode;
+}) {
+  const state = resolveAsyncState({ loading, error, hasData, loadingMessage, emptyMessage });
+
+  if (state.kind === 'loading') return <LoadingState message={state.message} />;
+  if (state.kind === 'error') return <div className="error-box" role="alert">{state.message}</div>;
+  if (state.kind === 'empty') return <EmptyState message={state.message} />;
+  return children;
 }
 
 function StatusCard({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'neutral' | 'success' }) {

@@ -1,6 +1,10 @@
 version: '3.9'
 
 services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
+
   backend:
     image: python:3.13-slim
     working_dir: /app
@@ -11,8 +15,10 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: sqlite:///./nss_bloodconnect.db
-      JWT_SECRET: change-me-in-production
       FRONTEND_URL: http://localhost:5173
+      RATE_LIMIT_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
 
   frontend:
     image: node:20-alpine

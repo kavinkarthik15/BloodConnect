@@ -14,7 +14,20 @@ router = APIRouter(prefix="/api/coordinator", tags=["coordinator-reporting"])
 
 
 def request_report(item: BloodRequest):
-    return {"id": item.id, "request_code": item.request_code, "blood_group": item.blood_group, "city": item.city, "urgency": item.urgency, "status": item.status, "created_at": item.created_at, "fulfilled_at": item.fulfilled_at}
+    return {
+        "id": item.id,
+        "request_code": item.request_code,
+        "blood_group": item.blood_group,
+        "city": item.city,
+        "urgency": item.urgency,
+        "status": item.status,
+        "units_required": item.units_required,
+        "units_confirmed": item.units_confirmed,
+        "legacy_fulfillment_unverified": item.legacy_fulfillment_unverified,
+        "escalation_status": item.escalation_status,
+        "created_at": item.created_at,
+        "fulfilled_at": item.fulfilled_at,
+    }
 
 
 def response_report(item: DonorResponse):
@@ -35,8 +48,10 @@ async def analytics(user: User = Depends(require_role(["coordinator"])), db: Ses
             "total": len(requests),
             "submitted": sum(item.status == "submitted" for item in requests),
             "verified": sum(item.status == "verified" for item in requests),
-            "active": sum(item.status not in {"fulfilled", "cancelled"} for item in requests),
-            "fulfilled": sum(item.status == "fulfilled" for item in requests),
+            "active": sum(item.status in {"submitted", "verified", "coordinating", "partially_fulfilled"} for item in requests),
+            "fulfilled": sum(item.status == "fulfilled" and not item.legacy_fulfillment_unverified for item in requests),
+            "legacy_fulfillment_unverified": sum(item.legacy_fulfillment_unverified for item in requests),
+            "partially_fulfilled": sum(item.status == "partially_fulfilled" for item in requests),
             "urgent": sum(item.urgency in {"Urgent", "Emergency"} for item in requests),
         },
         "donors": {"registered": donors},
@@ -59,7 +74,8 @@ async def analytics(user: User = Depends(require_role(["coordinator"])), db: Ses
 async def reports(user: User = Depends(require_role(["coordinator"])), db: Session = Depends(get_db)):
     return {
         "recent_requests": [request_report(item) for item in db.query(BloodRequest).order_by(BloodRequest.created_at.desc()).limit(20).all()],
-        "fulfilled_requests": [request_report(item) for item in db.query(BloodRequest).filter(BloodRequest.status == "fulfilled").order_by(BloodRequest.fulfilled_at.desc()).limit(20).all()],
+        "fulfilled_requests": [request_report(item) for item in db.query(BloodRequest).filter(BloodRequest.status == "fulfilled", BloodRequest.legacy_fulfillment_unverified.is_(False)).order_by(BloodRequest.fulfilled_at.desc()).limit(20).all()],
+        "legacy_fulfillment_unverified": [request_report(item) for item in db.query(BloodRequest).filter(BloodRequest.legacy_fulfillment_unverified.is_(True)).order_by(BloodRequest.updated_at.desc()).limit(20).all()],
         "donor_responses": [response_report(item) for item in db.query(DonorResponse).order_by(DonorResponse.responded_at.desc()).limit(50).all()],
         "volunteer_activity": [assignment_report(item) for item in db.query(VolunteerAssignment).order_by(VolunteerAssignment.updated_at.desc()).limit(50).all()],
         "campaign_activity": [campaign_payload(item) for item in db.query(Campaign).order_by(Campaign.created_at.desc()).limit(50).all()],

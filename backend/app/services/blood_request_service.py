@@ -20,6 +20,7 @@ def create_blood_request(db: Session, user_id: int, payload: dict):
         patient_reference=payload["patient_reference"],
         blood_group=payload["blood_group"],
         units_required=payload["units_required"],
+        units_confirmed=0,
         hospital_name=payload["hospital_name"],
         hospital_address=payload["hospital_address"],
         city=payload["city"],
@@ -31,15 +32,30 @@ def create_blood_request(db: Session, user_id: int, payload: dict):
         contact_phone=payload["contact_phone"],
         notes=payload.get("notes"),
         status="submitted",
+        escalation_status="emergency" if str(payload.get("urgency", "")).casefold() == "emergency" else "normal",
     )
     db.add(request)
+    db.flush()
+    notify_active_coordinators(db, request)
     db.commit()
     db.refresh(request)
-
-    # notify coordinator of new request
-    db.add(Notification(user_id=1, type="new_blood_request", title="New blood request", message=f"A new blood request {request.request_code} is awaiting verification.", related_entity_id=request.id))
-    db.commit()
     return request
+
+
+def notify_active_coordinators(db: Session, request: BloodRequest) -> int:
+    coordinators = db.query(User).filter(
+        User.role == "coordinator",
+        User.active.is_(True),
+    ).all()
+    for coordinator in coordinators:
+        db.add(Notification(
+            user_id=coordinator.id,
+            type="new_blood_request",
+            title="New blood request",
+            message=f"A new blood request {request.request_code} is awaiting verification.",
+            related_entity_id=request.id,
+        ))
+    return len(coordinators)
 
 
 def get_request_by_id(db: Session, request_id: int):
